@@ -1,0 +1,11 @@
+name: nano-cohere
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - ffmpeg
+  - pip
+  - pip:
+      - -e .
+      - "transformers>=5.4.0"   # benchmark comparison only, not a runtime dep
+      - librosa                 # benchmark parity + optional resampling
