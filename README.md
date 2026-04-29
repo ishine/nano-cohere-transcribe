@@ -24,28 +24,24 @@ The model weights are gated. Accept the license at <https://huggingface.co/Coher
 hf auth login
 ```
 
-Then `pip install`:
+Then install with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-pip install nano-cohere-transcribe
+uv pip install nano-cohere-transcribe
 ```
 
-For audio loading from arbitrary container formats (mp3, m4a, …) you also want `ffmpeg` on `$PATH`:
-
-```bash
-conda install -c conda-forge ffmpeg -y    # or: apt install ffmpeg
-```
+For audio loading from arbitrary container formats (mp3, m4a, …) you also want `ffmpeg` on `$PATH` (`brew install ffmpeg` / `apt install ffmpeg`).
 
 ### Development setup
 
 ```bash
 git clone https://github.com/Deep-unlearning/nano-cohere-transcribe
 cd nano-cohere-transcribe
-conda env create -f environment.yml
-conda activate nano-cohere
-pip install -e .
+uv venv --python 3.11
+source .venv/bin/activate
+uv pip install -e .
 # optional, benchmarks only:
-pip install "transformers>=5.5.1" librosa jiwer whisper-normalizer datasets pyarrow
+uv pip install "transformers>=5.5.1" librosa jiwer whisper-normalizer datasets pyarrow
 ```
 
 ## Use
