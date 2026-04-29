@@ -10,7 +10,7 @@ Inspired by [nano-parakeet](../nano-parakeet), which does the same trick for NVI
 
 - ✅ 14 languages: en, fr, de, es, it, pt, nl, pl, el, ar, ja, zh, vi, ko
 - ✅ Greedy autoregressive decoding with self-attn & cross-attn KV cache
-- ✅ Batched chunk packing — **1.5×–1.3× faster than the native transformers path** (short / long-form) and matches the Open ASR Leaderboard's 10.86 % WER on earnings22 within rounding
+- ✅ CUDA-graph decoder step + batched chunk packing — **1.5×–3.6× faster than the native transformers path** (short / long-form, bs=64 → bs=1) and matches the Open ASR Leaderboard's 10.86 % WER on earnings22 within rounding
 - ✅ bfloat16 auto-select on Ampere+, fp32 fallback on CPU
 - ✅ Long-form audio via automatic energy-based chunking at quiet points
 - ✅ Pluggable detokenizer (SentencePiece default, HuggingFace `tokenizers` optional)
@@ -66,7 +66,7 @@ print(text)
 
 All runs on a single **NVIDIA A100-80GB**, bf16, greedy decoding. WER is computed after Whisper's `EnglishTextNormalizer` (the Open ASR Leaderboard's normalizer) — lowercase, strip punctuation, drop disfluencies, normalize numbers/contractions/currency/dates.
 
-Both impls share the same greedy decoder, the same 35-second energy-based chunker for long audio, and the same bf16 weights. The differences measured below come from (a) nano's inline KV-cache and (b) chunk-level batch packing that doesn't re-enter the transformers `generate()` machinery per chunk.
+Both impls share the same greedy decoder, the same 35-second energy-based chunker for long audio, and the same bf16 weights. The differences measured below come from (a) nano's inline KV-cache, (b) chunk-level batch packing that doesn't re-enter the transformers `generate()` machinery per chunk, and (c) CUDA-graph capture of the per-step decoder forward (auto-disabled at chunk-batch ≥ 16 since per-shape capture overhead outweighs the win once launch is amortized across a large batch).
 
 ### Short-form: `hf-audio/open-asr-leaderboard` → earnings22
 
@@ -75,9 +75,9 @@ Both impls share the same greedy decoder, the same 35-second energy-based chunke
 | impl                          | wall        | RTFx       | WER         |
 | ----------------------------- | ----------- | ---------- | ----------- |
 | transformers 5.5.4 (native)   | 36.8 s      | 530.3×     | **10.82 %** |
-| **nano-cohere-transcribe**    | **25.2 s**  | **775.6×** | **10.82 %** |
+| **nano-cohere-transcribe**    | **24.7 s**  | **791.4×** | **10.82 %** |
 
-WER matches the [Open ASR Leaderboard](https://huggingface.co/spaces/hf-audio/open_asr_leaderboard) (10.86 %) within rounding for both impls, confirming the benchmark methodology. Nano is **1.46× faster** at bs=64 with **byte-identical aggregate WER**.
+WER matches the [Open ASR Leaderboard](https://huggingface.co/spaces/hf-audio/open_asr_leaderboard) (10.86 %) within rounding for both impls, confirming the benchmark methodology. Nano is **1.49× faster** at bs=64 with **byte-identical aggregate WER**. (CUDA graphs are auto-disabled at `B > 16` since per-shape capture overhead outweighs the win when launch is already amortized across a large batch.)
 
 ### Long-form: `hf-audio/asr-leaderboard-longform` → earnings21
 
@@ -85,21 +85,21 @@ WER matches the [Open ASR Leaderboard](https://huggingface.co/spaces/hf-audio/op
 
 #### batch_size = 8
 
-| impl                          | wall             | RTFx       | WER        |
-| ----------------------------- | ---------------- | ---------- | ---------- |
-| transformers 5.5.4 (native)   | 720.8 s (12 min) | 196.1×     | **8.68 %** |
-| **nano-cohere-transcribe**    | **537.6 s (9.0 min)** | **262.9×** | 8.73 %     |
+| impl                          | wall                 | RTFx       | WER        |
+| ----------------------------- | -------------------- | ---------- | ---------- |
+| transformers 5.5.4 (native)   | 720.8 s (12.0 min)   | 196.1×     | **8.68 %** |
+| **nano-cohere-transcribe**    | **224.0 s (3.7 min)** | **631.5×** | 8.73 %     |
 
-Nano is **1.34× faster** with **+0.05 pp WER** — within rounding.
+Nano is **3.22× faster** with **+0.05 pp WER** — within rounding. The win comes from CUDA-graph capture of the per-step decoder forward (one GPU dispatch per token instead of hundreds of small kernel launches).
 
 #### batch_size = 1
 
-| impl                          | wall                 | RTFx       | WER        |
-| ----------------------------- | -------------------- | ---------- | ---------- |
-| transformers 5.5.4 (native)   | 3681.1 s (61.4 min)  | 38.4×      | **8.68 %** |
-| **nano-cohere-transcribe**    | **3098.2 s (51.6 min)** | **45.6×** | 8.72 %     |
+| impl                          | wall                  | RTFx        | WER        |
+| ----------------------------- | --------------------- | ----------- | ---------- |
+| transformers 5.5.4 (native)   | 3681.1 s (61.4 min)   | 38.4×       | **8.68 %** |
+| **nano-cohere-transcribe**    | **1017.8 s (17.0 min)** | **138.6×** | 8.72 %     |
 
-Nano is **1.19× faster** at bs=1 (vs 1.34× at bs=8) — both impls lose throughput at bs=1 (chunk-level serial processing), but transformers loses less because per-chunk Python dispatch overhead is amortized by the native generation loop. Nano's WER is unchanged between bs=1 and bs=8 (8.72% vs 8.73%), confirming that batching is purely a throughput lever — no quality impact.
+Nano is **3.62× faster** at bs=1 — the autoregressive loop is dominated by per-step kernel launch overhead, exactly what CUDA graph replay erases. Both impls process chunks serially at bs=1, but nano replays a single graph dispatch per token while transformers issues hundreds of kernel launches per step. WER is unchanged between bs=1 and bs=8 (8.72% vs 8.73%) — batching is a throughput lever, not a quality one.
 
 ### Notes on the transformers path
 
