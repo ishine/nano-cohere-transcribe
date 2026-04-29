@@ -72,12 +72,12 @@ Both impls share the same greedy decoder, the same 35-second energy-based chunke
 
 Time to a ready-to-transcribe model with the HF cache warm (no network):
 
-| impl                          | load   | warm-up | total   |
-| ----------------------------- | ------ | ------- | ------- |
-| transformers 5.5.4 (native)   | 4.9 s  | 0.1 s   | **5.0 s** |
-| nano-cohere-transcribe        | 17.5 s | 0.4 s   | 17.9 s  |
+| impl                          | load   | warm-up | total     |
+| ----------------------------- | ------ | ------- | --------- |
+| transformers 5.5.4 (native)   | 4.9 s  | 0.1 s   | 5.0 s     |
+| **nano-cohere-transcribe**    | **2.1 s** | **0.4 s** | **2.5 s** |
 
-Transformers wins cold start by ~3.5× — its loader streams safetensors directly into the right device + dtype, while nano currently builds the module on CPU with random init, loads the state dict, then casts/moves the whole model. Closing this gap is on the roadmap (meta-init + direct-to-device safetensors). Nano's "warm-up" includes the first CUDA-graph capture for `B=1`, which is why subsequent calls at that batch are fast (see `bs=1` numbers below).
+Nano is **2.0× faster** at cold start. The trick: build the module tree on `meta` (no fp32 random init for 2B params), stream safetensors straight to GPU via `safetensors.load_file(..., device="cuda")`, and `load_state_dict(..., assign=True)` to swap the meta tensors for the real ones by reference — no CPU staging copy, no full-model `.to(...)` cast at the end. Nano's warm-up includes the first CUDA-graph capture for `B=1`, which is why subsequent calls at that batch are fast (see `bs=1` numbers below).
 
 Reproduce: `python benchmark_coldstart.py`.
 
