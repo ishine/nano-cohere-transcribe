@@ -46,13 +46,42 @@ uv pip install "transformers>=5.5.1" librosa jiwer whisper-normalizer datasets p
 
 ## Use
 
-CLI:
+### CLI
 
 ```bash
+# Short clip
 python -m nano_cohere_transcribe audio.wav --language en
+
+# Or, after `pip install`:
+nano-cohere-transcribe audio.wav --language en
 ```
 
-Python:
+Long audio (anything past the 35-second model budget) is **chunked automatically** at quiet points by an energy-based splitter. All chunks from one call are sorted longest-first and packed into batches of `--batch-size` for efficient padding.
+
+```bash
+# Long clip — process 8 chunks per forward pass (default)
+python -m nano_cohere_transcribe earnings_call_55min.mp3 --language en --batch-size 8
+
+# Or use a smaller batch if you're VRAM-limited
+python -m nano_cohere_transcribe earnings_call_55min.mp3 --language en --batch-size 4
+
+# Or push it on a big GPU for max throughput
+python -m nano_cohere_transcribe earnings_call_55min.mp3 --language en --batch-size 16
+```
+
+`--batch-size` is **chunk-wise** — it's how many 35-second chunks the GPU processes in one forward pass, *not* how many input files you pass. For a 60-minute clip this means ~100 chunks total, and the wall time drops roughly inversely with batch size up to the point where you saturate the encoder. On an A100 the sweet spot is `--batch-size 8` (long-form earnings21 RTFx 632×, see [Benchmark](#benchmark)). A T4 / L4 / 24 GB consumer card should drop to `--batch-size 4` or `2`.
+
+Other useful CLI flags:
+
+| flag | default | what it does |
+|---|---|---|
+| `--language` | `en` | ISO 639-1 code; one of the 14 supported languages |
+| `--no-punctuation` | off | Emit lowercase, no punctuation (matches Open ASR Leaderboard convention) |
+| `--max-new-tokens` | `256` | Decoder budget per chunk; bump for unusually dense speech |
+| `--device` | `cuda` | `cuda`, `cuda:1`, or `cpu` |
+| `--model` | `CohereLabs/cohere-transcribe-03-2026` | HF repo id or local snapshot path |
+
+### Python
 
 ```python
 from nano_cohere_transcribe import from_pretrained
@@ -60,8 +89,19 @@ from nano_cohere_transcribe.audio import load_audio_16k_mono
 
 model = from_pretrained("CohereLabs/cohere-transcribe-03-2026", device="cuda")
 waveform = load_audio_16k_mono("audio.wav")     # torch.float32 [num_samples]
-text = model.transcribe(waveform, language="en")
+
+# Short or long audio — auto-chunked when needed
+text = model.transcribe(waveform, language="en", batch_size=8)
 print(text)
+```
+
+#### Batched transcription across multiple files
+
+Long clips in the batch are auto-chunked internally; all chunks across all inputs are then sorted longest-first and packed into batches of `batch_size` for efficient padding.
+
+```python
+wavs  = [load_audio_16k_mono(p) for p in ["a.wav", "b.wav", "c.wav"]]
+texts = model.transcribe_batch(wavs, language="en", batch_size=8)
 ```
 
 ## Benchmark
@@ -122,19 +162,6 @@ python benchmark_datasets.py earnings21-lb --num-samples 0 --batch-size 1
 # Nano only (skip heavy transformers half)
 python benchmark_datasets.py earnings21-lb --num-samples 0 --batch-size 8 --skip-transformers
 ```
-
-### Batched transcription from Python
-
-```python
-from nano_cohere_transcribe import from_pretrained
-from nano_cohere_transcribe.audio import load_audio_16k_mono
-
-model = from_pretrained("CohereLabs/cohere-transcribe-03-2026", device="cuda")
-wavs = [load_audio_16k_mono(p) for p in ["a.wav", "b.wav", "c.wav"]]
-texts = model.transcribe_batch(wavs, language="en", batch_size=8)
-```
-
-Long clips in the batch are auto-chunked internally; all chunks across all inputs are sorted longest-first and packed into batches of `batch_size` for efficient padding.
 
 ### Fast vs. SentencePiece detokenizer
 
