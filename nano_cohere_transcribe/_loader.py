@@ -63,7 +63,17 @@ def load_model_from_snapshot(
         raw_cfg = json.load(f)
     cfg = CohereAsrConfig.from_hf_config(raw_cfg)
 
-    state = safetensors_load_file((snapshot_dir / "model.safetensors").as_posix())
+    target_device = torch.device(device)
+    if dtype is None:
+        dtype = _autoselect_dtype(target_device)
+
+    # Stream weights straight to the target device — the checkpoint is already
+    # bf16, so when the user wants bf16 on cuda we skip an entire CPU staging
+    # copy + tree-wide ``model.to(...)`` cast.
+    state_device = str(target_device) if target_device.type == "cuda" else "cpu"
+    state = safetensors_load_file(
+        (snapshot_dir / "model.safetensors").as_posix(), device=state_device
+    )
 
     # Split out preprocessor buffers; they're stored in the checkpoint but
     # their home module (`FilterbankFeatures`) keeps them as non-persistent
@@ -81,9 +91,14 @@ def load_model_from_snapshot(
     # with the same values; we keep only the embedding side and re-tie in __init__.
     state.pop("log_softmax.mlp.layer0.weight", None)
 
-    model = CohereAsr(cfg)
-    missing, unexpected = model.load_state_dict(state, strict=False)
-    # Re-tie after load (load_state_dict may have broken the alias on older torch).
+    # Build the module tree on `meta` — every parameter / buffer is a shape
+    # placeholder, no actual storage allocated. ``load_state_dict(..., assign=True)``
+    # then swaps in the GPU tensors we already loaded, so we never pay for a
+    # 2B-param fp32 random init nor a CPU→GPU copy of the full model.
+    with torch.device("meta"):
+        model = CohereAsr(cfg)
+    missing, unexpected = model.load_state_dict(state, strict=False, assign=True)
+    # Re-tie after assign — meta-init lost the alias.
     model.log_softmax.mlp.layer0.weight = model.transf_decoder._embedding.token_embedding.weight
 
     if unexpected:
@@ -99,20 +114,23 @@ def load_model_from_snapshot(
     if unexpected_missing:
         raise RuntimeError(f"Missing keys not accounted for: {unexpected_missing[:8]} (...)")
 
-    # Install preprocessor buffers.
+    # Install preprocessor buffers (on the right device).
     if fb is not None:
+        fb = fb.to(target_device)
         model.preprocessor.featurizer.fb = fb.squeeze(0) if fb.dim() == 3 else fb
         # Reference stores [1, n_mels, n_fft//2+1]; matmul expects same layout.
         if model.preprocessor.featurizer.fb.dim() == 2:
             model.preprocessor.featurizer.fb = model.preprocessor.featurizer.fb.unsqueeze(0)
     if window is not None:
-        model.preprocessor.featurizer.window = window
+        model.preprocessor.featurizer.window = window.to(target_device)
 
-    # Dtype + device.
+    # If the user asked for a different dtype than the checkpoint stores,
+    # cast now (rare — we autoselect bf16 on Ampere+ which matches the file).
+    weight_dtype = next(model.parameters()).dtype
+    if dtype != weight_dtype:
+        model = model.to(dtype=dtype)
+
     model.eval()
-    if dtype is None:
-        dtype = _autoselect_dtype(device)
-    model = model.to(device=torch.device(device), dtype=dtype)
     # Keep BatchNorm running stats in fp32 for numerical stability.
     for m in model.modules():
         if isinstance(m, torch.nn.BatchNorm1d):
